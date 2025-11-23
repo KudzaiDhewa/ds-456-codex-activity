@@ -1,0 +1,184 @@
+---
+title: "Police Incidents 2025 – Exploration and Mapping"
+output: html_document
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(skimr)
+library(lubridate)
+library(sf)
+
+theme_set(theme_minimal())
+
+df <- read_csv("data/Police_Incidents_2025.csv")
+```
+
+```{r basic-info}
+# Basic structure
+dim(df)          # rows, columns
+names(df)        # column names
+glimpse(df)      # types and a peek at values
+skim(df)         # richer summary (missingness, distributions)
+```
+
+```{r basic-summaries}
+# First 10 rows
+head(df, 10)
+
+# Offense description distribution (top 15)
+df %>% 
+  filter(!is.na(description)) %>% 
+  count(description, sort = TRUE, name = "incidents") %>% 
+  slice_head(n = 15)
+
+# Neighborhood distribution (top 15)
+df %>% 
+  filter(!is.na(neighborhood)) %>% 
+  count(neighborhood, sort = TRUE, name = "incidents") %>% 
+  slice_head(n = 15)
+
+# Summary of numeric columns
+df %>% 
+  select(where(is.numeric)) %>% 
+  summary()
+```
+
+```{r time-variables}
+# Create a date variable from reportedDateTime
+df <- df %>% 
+  mutate(
+    reportedDateTime = ymd_hms(reportedDateTime, tz = "UTC"),
+    reported_date = as_date(reportedDateTime)
+  )
+
+# Incidents per day
+incidents_by_day <- df %>% 
+  filter(!is.na(reported_date)) %>% 
+  count(reported_date, name = "incidents")
+
+incidents_by_day
+```
+
+```{r viz-time, fig.width=7, fig.height=4}
+# Simple time-series of daily incidents
+incidents_by_day %>% 
+  ggplot(aes(x = reported_date, y = incidents)) +
+  geom_line(color = "steelblue") +
+  labs(
+    title = "Daily Police Incidents in 2025 (Minneapolis)",
+    x = "Reported date",
+    y = "Number of incidents"
+  )
+```
+
+```{r viz-offense, fig.width=7, fig.height=4}
+# Bar plot of most common offense descriptions
+df %>% 
+  filter(!is.na(description)) %>% 
+  count(description, sort = TRUE, name = "incidents") %>% 
+  slice_head(n = 10) %>% 
+  ggplot(aes(x = reorder(description, incidents), y = incidents)) +
+  geom_col(fill = "tomato") +
+  coord_flip() +
+  labs(
+    title = "Top 10 Offense Descriptions (Police Incidents 2025)",
+    x = "Offense description",
+    y = "Number of incidents"
+  )
+```
+
+```{r viz-map-quick, fig.width=5, fig.height=5}
+# Quick scatter "map" of incident locations using centerLong / centerLat
+df %>% 
+  filter(!is.na(centerLong), !is.na(centerLat)) %>% 
+  ggplot(aes(x = centerLong, y = centerLat)) +
+  geom_point(alpha = 0.15, size = 0.4, color = "purple") +
+  coord_equal() +
+  labs(
+    title = "Police Incidents – Approximate Locations (Center Points)",
+    x = "Longitude",
+    y = "Latitude"
+  )
+```
+
+```{r sf-map, message=FALSE, warning=FALSE, fig.width=5, fig.height=5}
+# Convert to sf object and create a proper map of all incidents
+incidents_sf <- df %>% 
+  filter(!is.na(centerLong), !is.na(centerLat)) %>% 
+  st_as_sf(coords = c("centerLong", "centerLat"), crs = 4326, remove = FALSE)
+
+ggplot() +
+  geom_sf(data = incidents_sf, color = "darkred", alpha = 0.15, size = 0.3) +
+  coord_sf() +
+  labs(
+    title = "Map of Police Incidents in Minneapolis (2025)",
+    subtitle = "Each point represents a reported incident",
+    x = "Longitude",
+    y = "Latitude"
+  )
+```
+
+```{r shapefile-map, message=FALSE, warning=FALSE, fig.width=5, fig.height=5}
+# Read the shapefile version of the incidents and map them
+incidents_shp <- st_read("data/Police_Incidents_shapefile/Police_Incidents_2025.shp", quiet = TRUE)
+
+ggplot() +
+  geom_sf(data = incidents_shp, color = "darkblue", alpha = 0.2, size = 0.3) +
+  coord_sf() +
+  labs(
+    title = "Police Incidents in Minneapolis (2025) from Shapefile",
+    subtitle = "Each point is an incident from the shapefile layer",
+    x = "Longitude",
+    y = "Latitude"
+  )
+```
+
+```{r mpls-base-layer-boundaries-roads, message=FALSE, warning=FALSE, fig.width=6, fig.height=6}
+# Online base layers: Minneapolis city boundary and street centerlines
+mpls_boundary <- st_read(
+  "https://services.arcgis.com/afSMGVsC7QlRK1kZ/ArcGIS/rest/services/MPLS_Boundary/FeatureServer/0",
+  quiet = TRUE
+)
+
+mpls_roads <- st_read(
+  "https://services.arcgis.com/afSMGVsC7QlRK1kZ/ArcGIS/rest/services/MPLS_Centerline/FeatureServer/0",
+  quiet = TRUE
+)
+
+# Make sure incident points are in the same CRS as the base layers
+incidents_sf_base <- df %>% 
+  filter(!is.na(centerLong), !is.na(centerLat)) %>% 
+  st_as_sf(coords = c("centerLong", "centerLat"), crs = 4326, remove = FALSE) %>% 
+  st_transform(st_crs(mpls_boundary))
+
+ggplot() +
+  geom_sf(data = mpls_boundary, fill = NA, color = "black", linewidth = 0.4) +
+  geom_sf(data = mpls_roads, color = "grey70", linewidth = 0.2) +
+  geom_sf(data = incidents_sf_base, color = "red", alpha = 0.25, size = 0.3) +
+  coord_sf() +
+  labs(
+    title = "Police Incidents in Minneapolis (2025)",
+    subtitle = "Incidents overlaid on Minneapolis city boundary and roads (online layers)",
+    x = NULL,
+    y = NULL
+  )
+```
+
+```{r surprising-patterns}
+# Look for potentially surprising patterns:
+# 1. Offenses by precinct (using full descriptions)
+offense_by_precinct <- df %>% 
+  filter(!is.na(precinct), !is.na(description)) %>% 
+  count(precinct, description, sort = TRUE, name = "incidents")
+
+offense_by_precinct %>% slice_head(n = 20)
+
+# 2. Incidents by weekday
+df <- df %>% 
+  mutate(weekday = wday(reported_date, label = TRUE))
+
+df %>% 
+  filter(!is.na(weekday)) %>% 
+  count(weekday, sort = TRUE, name = "incidents")
+```
